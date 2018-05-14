@@ -39,8 +39,8 @@ function add_syn_picture(addr, probability, picture) {
 
     var frame = $("<div>", { addClass: "frame clearfix" });
     frame.attr("id", frameid);
-    //frame.prependTo("#pictures").hide().fadeIn(300);
-    frame.prependTo("#pictures");
+    frame.prependTo("#pictures").hide().fadeIn(300);
+    //frame.prependTo("#pictures");
     frame.append("<svg class='synpic' id='" + svgid + "'>");
     frame.append("<div class='description'> Address: " + addr + "<br/>" +
 		 "Probabirity of Malicious: " +
