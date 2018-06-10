@@ -7,16 +7,23 @@ import dpkt
 import pcapy
 import socket
 import argparse
+
+
 from threading import Thread
+from threading import Lock
 
 import numpy as np
 from keras.models import load_model
+from keras.optimizers import RMSprop
 
 from websocket_server import WebsocketServer
 
 model = None # trained model h5 file
 wssrv = None # WebSocketServer instance
 interval = None # interval of export to websocket (for test)
+
+predict_lock = Lock()
+
 
 class SynPacket() :
 
@@ -36,6 +43,9 @@ class SynPicture() :
     def __init__(self, addr) :
         self.addr = addr
         self.syn_packets = []
+
+    def __str__(self) :
+        return(str(self.syn_packets))
 
     def add_packet(self, ip_pkt) :
         
@@ -95,6 +105,23 @@ class SynPicture() :
     
 
 
+class Capture_wo_Thread:
+
+    def __init__(self, dev):
+        self.dev = dev
+        self.hosts = {} # key addr, value SynPicture
+
+    def start(self) :
+        print("Start Capture without Threading")
+        p = pcapy.open_live(self.dev, 128, True, 1)
+        p.setfilter("tcp[13] & 255 == 2") # SYN only
+        p.loop(-1, self.handle_packet)
+
+    def handle_packet(self, header, data) :
+        store(self.hosts, data)
+
+
+
 class Capture(Thread) :
 
     def __init__(self, pcap) :
@@ -103,7 +130,12 @@ class Capture(Thread) :
         Thread.__init__(self)
 
     def run(self) :
-        self.pcap.loop(0, self.handler)
+        while True:
+            try :
+                self.pcap.loop(0, self.handler)
+            except Exception as e:
+                print("pcap loop exception: %s" % e)
+                
 
     def handler(self, header, data) :
         store(self.hosts, data)
@@ -111,7 +143,7 @@ class Capture(Thread) :
 
 class WebSocketServer(Thread) :
 
-    def __init__(self, host = "127.0.0.1", port = 8081) :
+    def __init__(self, host = "172.16.18.220", port = 8081) :
         self.host = host
         self.port = port
         self.server = WebsocketServer(self.port, host = self.host)
@@ -152,8 +184,11 @@ def readfile(filename, repeat = False) :
     
 def store(hosts, pkt) :
 
-    eth = dpkt.ethernet.Ethernet(pkt)
-    
+    try :
+        eth = dpkt.ethernet.Ethernet(pkt)
+    except :
+        return
+        
     if type(eth.data) == dpkt.ip.IP :
         ip = eth.data
     else :
@@ -172,6 +207,8 @@ def store(hosts, pkt) :
 
     if hosts[ipsrc].ready() :
         probability = predict(hosts[ipsrc])
+        if not probability :
+            return
         d = hosts[ipsrc].dump()
         d["probability"] = probability
         wssrv.send_all(json.dumps(d))
@@ -182,14 +219,21 @@ def store(hosts, pkt) :
 
 def predict(synpic) :
 
+    ret = predict_lock.acquire(False)
+    if not ret :
+        return False
+
     d = synpic.dump()
-    x_orig = np.asarray([d["picture"]])
+    x_orig = np.asarray([d["picture"][:100]])
+    print(x_orig)
     x = x_orig.astype("float32")
     x = x[:, np.newaxis]
     predicted = model.predict(x)
     
     print("%s: Negative %.2f, Positive %.2f" %
           (synpic.addr, predicted[0][0] * 100, predicted[0][1] * 100))
+
+    predict_lock.release()
 
     return predicted[0][1] * 100
 
@@ -210,14 +254,28 @@ if __name__ == "__main__" :
     parser.add_argument("-t", "--interval", help = "interval between export",
                         type = float, default = None)
 
+
+
+
     args = parser.parse_args()
+
     model = load_model(args.model)
+
+    #model = load_model(args.model, compile = False)
+    #model.compile(optimizer=RMSprop(),
+    #metrics=['accuracy'],
+    #loss='categorical_crossentropy')
+    
+    
+
     wssrv = WebSocketServer()
     interval = args.interval
     wssrv.start()
 
     if args.interface :
-        capture(args.interface)
+        #capture(args.interface)
+        c = Capture_wo_Thread(args.interface)
+        c.start()
 
     elif args.filename :
         readfile(args.filename, repeat = args.repeat)
